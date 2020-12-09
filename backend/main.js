@@ -44,6 +44,8 @@ const startApp = async (newApp, newPool) => {
 };
 
 // step 6: define the SQL queries
+/* We can't use a closure that retrieves a new connection every time a SQL Query is run.
+   We will need to have a closure that has the entire transaction inside */
 const SQL_QUERY_INSERT_ORDERS = "insert into orders (employee_id, customer_id, order_date) values (?, ?, ?)";
 const SQL_QUERY_INSERT_ORDER_DETAILS = "insert into order_details (order_id, product_id, quantity, unit_price, discount, status_id) values (?, ?, ?, ?, ?, ?)";
 
@@ -65,6 +67,44 @@ const makeQuery = (sql, pool) => {
 
 const insertOrders = makeQuery(SQL_QUERY_INSERT_ORDERS, pool);
 const insertOrderDetails = makeQuery(SQL_QUERY_INSERT_ORDER_DETAILS, pool);
+/* We can't use a closure that retrieves a new connection every time a SQL Query is run.
+   We will need to have a closure that has the entire transaction inside */
+
+const makeTransaction2 = (sql, pool) => {
+    console.info('=> Creating with sql: ', sql);
+    return (async (args) => {
+        const conn = await pool.getConnection();
+        try {
+            if(sql.length != 2 || args.length != 2) {
+                throw "Error.. this creation needs an array with 2 elements";
+            }
+
+            await conn.beginTransaction();
+
+            let results = await conn.query(sql[0], args[0]) || [];
+
+            const idArray = [results[0]['insertId']];
+            const args2 = idArray.concat(args[1]);
+
+            results = await conn.query(sql[1], args2) || [];
+
+            await conn.commit();
+            return results[0];
+        } catch (e) {
+            console.error(e);
+            conn.rollback();
+        } finally {
+            conn.release();
+        }
+    });
+}
+
+const SQL_QUERY_NEW_ORDER_TRANSACTION = [
+    "insert into orders (employee_id, customer_id, order_date) values (?, ?, ?)",
+    "insert into order_details (order_id, product_id, quantity, unit_price, discount, status_id) values (?, ?, ?, ?, ?, ?)"
+];
+
+const insertNewOrderTransaction = makeTransaction2(SQL_QUERY_NEW_ORDER_TRANSACTION, pool);
 
 // Step 7: define middlewares and any necessary routes
 app.use(cors());
@@ -77,6 +117,8 @@ app.post('/order', async (req, res, next) => {
     const bodyInfo = req.body;
     // console.info('=> Body received: ', bodyInfo);
 
+    /* we can't use this method as the query is made with another connection and the query is committed once the connection is closed.
+       hence, we will not be able to rollback when an error occurs
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
@@ -105,10 +147,16 @@ app.post('/order', async (req, res, next) => {
         conn.rollback();
     } finally {
         conn.release();
-    }
+    } */
+
+    const args = [
+        [ parseInt(bodyInfo['employee_id']), parseInt(bodyInfo['customer_id']), bodyInfo['order_date'] ],
+        [ parseInt(bodyInfo['product_id']), parseInt(bodyInfo['quantity']), parseFloat(bodyInfo['unit_price']), parseInt(bodyInfo['discount']), parseInt(bodyInfo['status_id']) ]
+    ];
+    const result = await insertNewOrderTransaction(args);
 
     res.status(200).contentType('application/json');
-    res.json({ status: "Success" });
+    res.json(result);
 });
 
 app.use((req, res, next) => {
